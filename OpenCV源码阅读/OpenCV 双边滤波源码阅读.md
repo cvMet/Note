@@ -72,7 +72,7 @@ void bilateralFilter( InputArray _src, OutputArray _dst, int d,
 }
 ```
 
-bilateralFilter_32f方法<br>
+bilateralFilter_32f方法，这个方法主要是执行表格的初始化。<br>
 源码包含于文件 \<opencv path\>/modules/imgproc/src/bilateral_filter.dispatch.cpp 中。源码如下
 
 ```c++
@@ -92,21 +92,29 @@ bilateralFilter_32f( const Mat& src, Mat& dst, int d,
     ***/
     int i, j, maxk, radius;
     double minValSrc=-1, maxValSrc=1; // 源图像最小像素值和最大像素值
-    const int kExpNumBinsPerChannel = 1 << 12;
-    int kExpNumBins = 0;
-    float lastExpVal = 1.f;
+    const int kExpNumBinsPerChannel = 1 << 12; // 不知道怎么描述...可以理解为单个通道的精度
+    int kExpNumBins = 0;    // 所有通道的精度，由 kExpNumBinsPerChannel × 通道数 得到
+    float lastExpVal = 1.f; // 用于保存上一次概率密度函数计算结果
+
+    /**
+    * len           像素点可能取得的最大差值，由 （最大值 - 最小值） × 通道数 计算得到
+    * scale_index   等分区间长度的倒数
+    **/
     float len, scale_index;
 
     CV_Assert( (src.type() == CV_32FC1 || src.type() == CV_32FC3) && src.data != dst.data );
 
+    /* 初始化方差 */
     if( sigma_color <= 0 )
         sigma_color = 1;
     if( sigma_space <= 0 )
         sigma_space = 1;
 
+    /* 初始化高斯函数指数的分母 */
     double gauss_color_coeff = -0.5/(sigma_color*sigma_color);
     double gauss_space_coeff = -0.5/(sigma_space*sigma_space);
 
+    /* 初始化核的半径和直径 */
     if( d <= 0 )
         radius = cvRound(sigma_space*1.5);
     else
@@ -115,31 +123,36 @@ bilateralFilter_32f( const Mat& src, Mat& dst, int d,
     d = radius*2 + 1;
     // compute the min/max range for the input image (even if multichannel)
 
+    // 获取图像上的最大值和最小值。将图像拉直，因为 OpenCV 是把三个通道合起来算的，
     minMaxLoc( src.reshape(1), &minValSrc, &maxValSrc );
+    // 如果图像最大值等于最小值那么滤波无效果，直接返回
     if(std::abs(minValSrc - maxValSrc) < FLT_EPSILON)
     {
         src.copyTo(dst);
         return;
     }
 
+    // 扩充原图边缘
     // temporary copy of the image with borders for easy processing
     Mat temp;
     copyMakeBorder( src, temp, radius, radius, radius, radius, borderType );
 
+    /* 为空间滤波器表格申请内存 */
     // allocate lookup tables
-    std::vector<float> _space_weight(d*d);
-    std::vector<int> _space_ofs(d*d);
+    std::vector<float> _space_weight(d*d);  // 记录空间滤波器权重
+    std::vector<int> _space_ofs(d*d);       // 记录像素偏移量
     float* space_weight = &_space_weight[0];
     int* space_ofs = &_space_ofs[0];
 
     // assign a length which is slightly more than needed
-    len = (float)(maxValSrc - minValSrc) * cn;
-    kExpNumBins = kExpNumBinsPerChannel * cn;
-    std::vector<float> _expLUT(kExpNumBins+2);
+    len = (float)(maxValSrc - minValSrc) * cn;  // 可能的最大差值
+    kExpNumBins = kExpNumBinsPerChannel * cn;   // 所有通道上的精度
+    std::vector<float> _expLUT(kExpNumBins+2);  // 为色彩空间权重表格分配内存
     float* expLUT = &_expLUT[0];
 
-    scale_index = kExpNumBins/len;
+    scale_index = kExpNumBins/len;  // 等分区间长度的倒数
 
+    // 初始化色彩空间权重表格
     // initialize the exp LUT
     for( i = 0; i < kExpNumBins+2; i++ )
     {
@@ -149,21 +162,23 @@ bilateralFilter_32f( const Mat& src, Mat& dst, int d,
             expLUT[i] = (float)std::exp(val * val * gauss_color_coeff);
             lastExpVal = expLUT[i];
         }
-        else
+        else    // 根据正态分布模型，离中心点越远权重越低，当出现第一个0，之后的所有权重一定为0
             expLUT[i] = 0.f;
     }
 
+    // 初始化空间权重和偏移表格
     // initialize space-related bilateral filter coefficients
     for( i = -radius, maxk = 0; i <= radius; i++ )
         for( j = -radius; j <= radius; j++ )
         {
-            double r = std::sqrt((double)i*i + (double)j*j);
+            double r = std::sqrt((double)i*i + (double)j*j);    // 半径
             if( r > radius || ( i == 0 && j == 0 ) )
                 continue;
             space_weight[maxk] = (float)std::exp(r*r*gauss_space_coeff);
             space_ofs[maxk++] = (int)(i*(temp.step/sizeof(float)) + j*cn);
         }
 
+    // 用于并行计算结构的类，下文会详细分析
     // parallel_for usage
     CV_CPU_DISPATCH(bilateralFilterInvoker_32f, (cn, radius, maxk, space_ofs, temp, dst, scale_index, space_weight, expLUT),
         CV_CPU_DISPATCH_MODES_ALL);
